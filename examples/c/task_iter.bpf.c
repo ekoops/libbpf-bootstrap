@@ -15,6 +15,13 @@ struct {
 	__type(value, struct task_info);
 } task_info_buf SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 8 * 1024 * 1024);
+} ringbuf SEC(".maps");
+
+const volatile __u8 use_ringbuf = 0;
+
 struct task_struct___post514 {
 	unsigned int __state;
 } __attribute__((preserve_access_index));
@@ -44,12 +51,20 @@ int get_tasks(struct bpf_iter__task *ctx)
 	struct seq_file *seq = ctx->meta->seq;
 	struct task_struct *task = ctx->task;
 	struct task_info *t;
-	long res;
+	long re
+	s;
 
 	if (!task)
 		return 0;
 
-	t = bpf_map_lookup_elem(&task_info_buf, &zero);
+	if (!use_ringbuf) {
+		t = bpf_map_lookup_elem(&task_info_buf, &zero);
+	} else {
+		t = bpf_ringbuf_reserve(&ringbuf, sizeof(struct task_info), 0);
+		if (!t) {
+			bpf_printk("failed to reserve");
+		}
+	}
 	if (!t)
 		return 0;
 
@@ -62,6 +77,10 @@ int get_tasks(struct bpf_iter__task *ctx)
 	res = bpf_get_task_stack(task, t->kstack, sizeof(__u64) * MAX_STACK_LEN, 0);
 	t->kstack_len = res <= 0 ? res : res / sizeof(t->kstack[0]);
 
-	bpf_seq_write(seq, t, sizeof(struct task_info));
+	if (!use_ringbuf) {
+		bpf_seq_write(seq, t, sizeof(struct task_info));
+	} else {
+		bpf_ringbuf_submit(t, 0);
+	}
 	return 0;
 }
